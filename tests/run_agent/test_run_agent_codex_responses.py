@@ -550,6 +550,70 @@ def test_run_codex_create_stream_fallback_backfills_null_terminal_output(monkeyp
     assert response.output[0].content[0].text == "terminal null ok"
 
 
+def test_run_codex_stream_no_deltas_typeerror_falls_back_to_create(monkeypatch):
+    """TypeError with no collected deltas falls back to create(stream=True)."""
+    agent = _build_agent(monkeypatch)
+    calls = {"create": 0}
+
+    def _fake_stream(**kwargs):
+        return _TypeErrorAfterEventsStream([])
+
+    def _fake_create(**kwargs):
+        calls["create"] += 1
+        return _codex_message_response("fallback ok")
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=_fake_create,
+        ),
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    assert calls["create"] == 1
+    assert response.output[0].content[0].text == "fallback ok"
+
+
+def test_run_codex_create_stream_fallback_typeerror_recovers_with_deltas(monkeypatch):
+    """Fallback stream iterator raises TypeError after collecting deltas."""
+    agent = _build_agent(monkeypatch)
+
+    class _TypeErrorFallbackStream:
+        def __iter__(self):
+            yield SimpleNamespace(type="response.output_text.delta", delta="recovered ")
+            yield SimpleNamespace(type="response.output_text.delta", delta="text")
+            raise TypeError("'NoneType' object is not iterable")
+        def close(self): pass
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _TypeErrorFallbackStream(),
+        ),
+    )
+
+    response = agent._run_codex_create_stream_fallback(_codex_request_kwargs())
+    assert response.output[0].content[0].text == "recovered text"
+
+
+def test_run_codex_create_stream_fallback_typeerror_no_data_raises_runtime(monkeypatch):
+    """Fallback stream TypeError with no data raises RuntimeError (not TypeError)."""
+    agent = _build_agent(monkeypatch)
+
+    class _EmptyTypeErrorStream:
+        def __iter__(self):
+            raise TypeError("'NoneType' object is not iterable")
+        def close(self): pass
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _EmptyTypeErrorStream(),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Codex fallback stream failed"):
+        agent._run_codex_create_stream_fallback(_codex_request_kwargs())
+
+
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))

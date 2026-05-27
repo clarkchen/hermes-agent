@@ -304,7 +304,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     log_label="Codex stream",
                 )
         except TypeError as exc:
-            if _responses_null_output_typeerror(exc) and (collected_output_items or collected_text_deltas):
+            if not _responses_null_output_typeerror(exc):
+                raise
+            if collected_output_items or collected_text_deltas:
                 logger.debug(
                     "Codex Responses stream crashed on terminal output=None; recovering from streamed events"
                 )
@@ -315,7 +317,12 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     has_tool_calls=has_tool_calls,
                     log_label="Codex stream",
                 )
-            raise
+            logger.warning(
+                "Codex stream: SDK TypeError with no collected deltas; "
+                "falling back to create(stream=True). %s error=%s",
+                agent._client_log_context(), exc,
+            )
+            return agent._run_codex_create_stream_fallback(api_kwargs, client=active_client)
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:
                 logger.debug(
@@ -464,6 +471,27 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
                     collected_text_deltas=collected_text_deltas,
                     log_label="Codex fallback stream",
                 )
+    except TypeError as exc:
+        if not _responses_null_output_typeerror(exc):
+            raise
+        if collected_output_items or collected_text_deltas:
+            logger.warning(
+                "Codex fallback stream: iterator TypeError; recovering from "
+                "%d output items / %d text deltas. %s error=%s",
+                len(collected_output_items), len(collected_text_deltas),
+                agent._client_log_context(), exc,
+            )
+            return _backfill_responses_output(
+                SimpleNamespace(output=None),
+                collected_output_items=collected_output_items,
+                collected_text_deltas=collected_text_deltas,
+                log_label="Codex fallback stream",
+            )
+        logger.warning(
+            "Codex fallback stream: iterator TypeError with no collected data. %s error=%s",
+            agent._client_log_context(), exc,
+        )
+        raise RuntimeError(f"Codex fallback stream failed: {exc}") from exc
     finally:
         close_fn = getattr(stream_or_response, "close", None)
         if callable(close_fn):
